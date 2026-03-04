@@ -377,11 +377,11 @@ export function useBlockchain() {
         );
         const houseMldsaSigner = quantumMaster.derivePath(QuantumDerivationPath.STANDARD);
 
-        // Use the EXACT known house PILL address (32-byte hash the contract recognizes)
-        const pillHex = HOUSE_PILL_ADDRESS.startsWith('0x') ? HOUSE_PILL_ADDRESS.slice(2) : HOUSE_PILL_ADDRESS;
-        const pillBytes = new Uint8Array(pillHex.match(/.{1,2}/g)!.map(b => parseInt(b, 16)));
-        const houseAddress = Address.wrap(pillBytes);
-        console.log('[HOUSE] Using known PILL address:', houseAddress.toHex());
+        // Build house Address with BOTH the known 32-byte PILL address AND the classical public key
+        // Address.fromString(mldsaPubKey, legacyPubKey) — first arg is the MLDSA key or its 32-byte hash
+        const classicalPubHex = '0x' + Array.from(new Uint8Array(houseSigner.publicKey)).map(b => b.toString(16).padStart(2, '0')).join('');
+        const houseAddress = Address.fromString(HOUSE_PILL_ADDRESS, classicalPubHex);
+        console.log('[HOUSE] Address with legacy key:', houseAddress.toHex());
 
         // Create contract with house as sender
         const contract = getContract<IOP20Contract>(
