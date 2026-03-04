@@ -2,7 +2,7 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 import { JSONRpcProvider, getContract, OP_20_ABI } from 'opnet';
 import type { IOP20Contract } from 'opnet';
 import { networks, fromBech32 } from '@btc-vision/bitcoin';
-import { Address, EcKeyPair } from '@btc-vision/transaction';
+import { Address, EcKeyPair, QuantumBIP32Factory, QuantumDerivationPath } from '@btc-vision/transaction';
 import { useWalletConnect } from '@btc-vision/walletconnect';
 
 const NETWORK = networks.opnetTestnet;
@@ -362,9 +362,17 @@ export function useBlockchain() {
     const payoutFromHouse = useCallback(async (playerBetAmount: bigint): Promise<string> => {
         const provider = getProvider();
 
-        // Create house signer from WIF
+        // Create classical house signer from WIF
         const houseSigner = EcKeyPair.fromWIF(HOUSE_WIF, NETWORK);
         const houseRefundAddress = EcKeyPair.getTaprootAddress(houseSigner, NETWORK);
+
+        // Create ML-DSA (quantum) signer from the house private key as seed
+        const housePrivKeyBytes = houseSigner.privateKey!;
+        const quantumMaster = QuantumBIP32Factory.fromSeed(
+            housePrivKeyBytes,
+            NETWORK,
+        );
+        const houseMldsaSigner = quantumMaster.derivePath(QuantumDerivationPath.STANDARD);
 
         // Derive house Address from publicKey
         const pubBytes = houseSigner.publicKey;
@@ -404,10 +412,10 @@ export function useBlockchain() {
             throw new Error(`House payout reverted: ${simulation.revert}`);
         }
 
-        console.log('[HOUSE] Signing and broadcasting with house key...');
+        console.log('[HOUSE] Signing and broadcasting with house key + ML-DSA...');
         const receipt = await simulation.sendTransaction({
             signer: houseSigner,
-            mldsaSigner: null,
+            mldsaSigner: houseMldsaSigner,
             refundTo: houseRefundAddress,
             maximumAllowedSatToSpend: 100000n,
             feeRate: 10,
