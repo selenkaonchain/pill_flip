@@ -1,7 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { JSONRpcProvider, getContract, OP_20_ABI } from 'opnet';
 import type { IOP20Contract } from 'opnet';
-import { networks } from '@btc-vision/bitcoin';
+import { networks, fromBech32 } from '@btc-vision/bitcoin';
 import { Address } from '@btc-vision/transaction';
 import { useWalletConnect } from '@btc-vision/walletconnect';
 
@@ -10,6 +10,9 @@ const RPC_URL = 'https://testnet.opnet.org';
 
 // $PILL token contract on OP_NET testnet
 export const PILL_CONTRACT = '0xb09fc29c112af8293539477e23d8df1d3126639642767d707277131352040cbb';
+
+// House wallet — receives lost bets, pays out wins
+export const HOUSE_ADDRESS = 'opt1pqyq9pjq27a24fy092vy86gzglmr389fvns7ftk8csxecjj5qvytszyycdv';
 
 interface BlockData {
     height: number;
@@ -291,6 +294,64 @@ export function useBlockchain() {
         }
     }, [wc.address, wc.walletAddress, wc.publicKey, (wc as any).mldsaPublicKey, (wc as any).hashedMLDSAKey]);
 
+    /**
+     * Transfer PILL tokens to the house address (on loss) or from house (on win).
+     * On loss: user signs a transfer of `amount` PILL to HOUSE_ADDRESS.
+     * Returns the tx receipt or throws.
+     */
+    const transferPillToHouse = useCallback(async (amount: bigint): Promise<string> => {
+        if (!wc.walletAddress || !wc.address) {
+            throw new Error('Wallet not connected or Address not available');
+        }
+
+        const provider = getProvider();
+
+        // Create contract with sender
+        const contract = getContract<IOP20Contract>(
+            PILL_CONTRACT,
+            OP_20_ABI,
+            provider,
+            NETWORK,
+            wc.address,
+        );
+
+        // Resolve house address → Address object
+        let houseAddr: Address | undefined;
+        try {
+            houseAddr = await provider.getPublicKeyInfo(HOUSE_ADDRESS, false);
+        } catch (e) {
+            console.warn('[PILL] getPublicKeyInfo for house failed:', e);
+        }
+
+        if (!houseAddr) {
+            // Decode opt1... bech32m → raw bytes → Address.wrap()
+            const decoded = fromBech32(HOUSE_ADDRESS);
+            houseAddr = Address.wrap(decoded.data);
+        }
+
+        console.log('[PILL] Simulating transfer of', amount.toString(), 'to house...');
+        const simulation = await contract.transfer(houseAddr, amount);
+
+        if (simulation.revert) {
+            throw new Error(`Transfer would fail: ${simulation.revert}`);
+        }
+
+        console.log('[PILL] Sending transaction (wallet will prompt)...');
+        const receipt = await simulation.sendTransaction({
+            signer: wc.signer ?? null,
+            mldsaSigner: null,
+            refundTo: wc.walletAddress,
+            maximumAllowedSatToSpend: 100000n,
+            feeRate: 10,
+            network: NETWORK,
+        });
+
+        console.log('[PILL] Transfer TX:', receipt);
+        return typeof receipt === 'object' && receipt !== null
+            ? JSON.stringify(receipt)
+            : String(receipt);
+    }, [wc.address, wc.walletAddress, wc.signer]);
+
     // Fetch block on mount and periodically
     useEffect(() => {
         fetchBlockData();
@@ -318,6 +379,7 @@ export function useBlockchain() {
         disconnectWallet,
         fetchBlockData,
         loadPillBalance,
+        transferPillToHouse,
         setError,
     };
 }

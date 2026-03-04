@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
-import { useBlockchain, PILL_CONTRACT } from './hooks/useBlockchain';
+import { useBlockchain, PILL_CONTRACT, HOUSE_ADDRESS } from './hooks/useBlockchain';
 
 type GameResult = 'pill' | 'skull' | null;
 type BetChoice = 'pill' | 'skull';
@@ -69,6 +69,7 @@ export function App() {
     const [virtualBalance, setVirtualBalance] = useState<number | null>(null);
     const [totalWagered, setTotalWagered] = useState(0);
     const [totalProfit, setTotalProfit] = useState(0);
+    const [txStatus, setTxStatus] = useState<string>('');
     const roundIdRef = useRef(0);
 
     // Sync virtual balance with real PILL balance on first load
@@ -112,9 +113,16 @@ export function App() {
     const flip = useCallback(async (choice: BetChoice) => {
         if (isFlipping) return;
 
-        // Check balance
-        if (virtualBalance !== null && betAmount > virtualBalance) {
-            bc.setError(`Insufficient $PILL! You have ${formatPill(virtualBalance)} but tried to bet ${formatPill(betAmount)}`);
+        // Check real PILL balance
+        if (!bc.pillInfo || bc.pillInfo.balance <= 0n) {
+            bc.setError('No $PILL balance detected! Connect wallet with PILL tokens.');
+            return;
+        }
+
+        const decimals = bc.pillInfo.decimals;
+        const realBalanceNum = Number(bc.pillInfo.balance / (10n ** BigInt(decimals)));
+        if (betAmount > realBalanceNum) {
+            bc.setError(`Insufficient $PILL! You have ${formatPill(realBalanceNum)} but tried to bet ${formatPill(betAmount)}`);
             return;
         }
 
@@ -123,11 +131,7 @@ export function App() {
         setLastResult(null);
         setLastWon(null);
         setLastPayout(0);
-
-        // Deduct bet immediately (virtual)
-        if (virtualBalance !== null) {
-            setVirtualBalance(v => (v ?? 0) - betAmount);
-        }
+        setTxStatus('');
 
         // Fetch fresh block
         const block = await bc.fetchBlockData();
@@ -138,20 +142,36 @@ export function App() {
         const hash = block?.hash || '0x' + Date.now().toString(16);
         const result = hashToResult(hash);
         const won = result === choice;
-        const payout = won ? betAmount * 2 : 0;
 
         setLastResult(result);
         setLastWon(won);
         setLastPayout(won ? betAmount : -betAmount);
         setIsFlipping(false);
 
-        // Update virtual balance
-        if (virtualBalance !== null) {
-            if (won) {
-                // Already deducted bet, add back 2x
-                setVirtualBalance(v => (v ?? 0) + payout);
+        // Real token transfer on LOSS
+        if (!won) {
+            try {
+                setTxStatus('⏳ Sign the transaction in your wallet to pay bet...');
+                const betAmountRaw = BigInt(betAmount) * (10n ** BigInt(decimals));
+                const txResult = await bc.transferPillToHouse(betAmountRaw);
+                setTxStatus(`✅ Bet paid! TX: ${txResult.slice(0, 40)}...`);
+                console.log('[GAME] Loss transfer complete:', txResult);
+                // Refresh balance
+                await bc.loadPillBalance();
+            } catch (e: any) {
+                const msg = e?.message || 'Transfer failed';
+                setTxStatus(`❌ Transfer failed: ${msg.slice(0, 80)}`);
+                console.error('[GAME] Loss transfer failed:', e);
+                // Still count the game but note the transfer failed
             }
-            // If lost, bet was already deducted
+        } else {
+            setTxStatus('🎉 You won! PILL stays in your wallet.');
+        }
+
+        // Update virtual balance from real balance
+        if (bc.pillInfo) {
+            const currentBal = Number(bc.pillInfo.balance / (10n ** BigInt(decimals)));
+            setVirtualBalance(currentBal);
         }
 
         setTotalWagered(tw => tw + betAmount);
@@ -182,7 +202,7 @@ export function App() {
             timestamp: Date.now(),
         };
         setHistory(h => [round, ...h].slice(0, 50));
-    }, [isFlipping, bc, betAmount, virtualBalance]);
+    }, [isFlipping, bc, betAmount]);
 
     const handleCustomBet = useCallback(() => {
         const val = parseInt(customBet.replace(/,/g, ''), 10);
@@ -328,6 +348,13 @@ export function App() {
                         </div>
                     )}
 
+                    {/* Transaction Status */}
+                    {txStatus && (
+                        <div className={`tx-status ${txStatus.startsWith('✅') ? 'tx-ok' : txStatus.startsWith('❌') ? 'tx-err' : 'tx-pending'}`}>
+                            {txStatus}
+                        </div>
+                    )}
+
                     {/* Bet Amount Selector */}
                     <div className="bet-amount-section">
                         <div className="bas-header">
@@ -435,6 +462,10 @@ export function App() {
                     <div className="contract-info">
                         <span className="ci-label">$PILL Contract</span>
                         <code className="ci-addr">{PILL_CONTRACT.slice(0, 10)}...{PILL_CONTRACT.slice(-8)}</code>
+                    </div>
+                    <div className="contract-info">
+                        <span className="ci-label">🏦 House Wallet</span>
+                        <code className="ci-addr">{HOUSE_ADDRESS.slice(0, 12)}...{HOUSE_ADDRESS.slice(-8)}</code>
                     </div>
                 </div>
 

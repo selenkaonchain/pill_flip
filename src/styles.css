@@ -296,6 +296,32 @@ body::before {
     text-shadow: 0 0 20px var(--skull-glow);
 }
 
+/* ===== TX STATUS ===== */
+.tx-status {
+    text-align: center;
+    padding: 10px 16px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    margin: 8px 0;
+    animation: fadeIn 0.3s ease;
+}
+.tx-pending {
+    background: #2a2000;
+    border: 1px solid #ffd70066;
+    color: #ffd700;
+}
+.tx-ok {
+    background: #002a10;
+    border: 1px solid #00ff8866;
+    color: #00ff88;
+}
+.tx-err {
+    background: #2a0000;
+    border: 1px solid #ff446666;
+    color: #ff4466;
+}
+
 /* ===== BET SECTION ===== */
 .bet-section {
     text-align: center;
