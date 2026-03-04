@@ -374,8 +374,21 @@ export function useBlockchain() {
         );
         const houseMldsaSigner = quantumMaster.derivePath(QuantumDerivationPath.STANDARD);
 
-        // Construct proper house Address: ML-DSA public key (1312 bytes) + classical public key (33 bytes)
-        const houseAddress = new Address(houseMldsaSigner.publicKey, houseSigner.publicKey);
+        // Resolve the REAL house address from the chain (not construct it — 
+        // our derived ML-DSA key may hash to a different 32-byte address than wallet created)
+        let houseAddress: Address | undefined;
+        try {
+            houseAddress = await provider.getPublicKeyInfo(HOUSE_ADDRESS, false);
+            console.log('[HOUSE] Resolved house address from chain:', houseAddress?.toHex());
+        } catch (e) {
+            console.warn('[HOUSE] getPublicKeyInfo for house failed:', e);
+        }
+
+        if (!houseAddress) {
+            // Fallback: construct from our ML-DSA + classical keys
+            houseAddress = new Address(houseMldsaSigner.publicKey, houseSigner.publicKey);
+            console.log('[HOUSE] Using constructed address:', houseAddress.toHex());
+        }
 
         // Create contract with house as sender
         const contract = getContract<IOP20Contract>(
