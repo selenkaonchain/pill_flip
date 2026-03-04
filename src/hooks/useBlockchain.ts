@@ -421,8 +421,8 @@ export function useBlockchain() {
             signer: houseSigner,
             mldsaSigner: houseMldsaSigner,
             refundTo: houseRefundAddress,
-            maximumAllowedSatToSpend: 100000n,
-            feeRate: 10,
+            maximumAllowedSatToSpend: 10000n,
+            feeRate: 1,
             network: NETWORK,
         });
 
