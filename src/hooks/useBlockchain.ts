@@ -374,10 +374,8 @@ export function useBlockchain() {
         );
         const houseMldsaSigner = quantumMaster.derivePath(QuantumDerivationPath.STANDARD);
 
-        // Derive house Address from publicKey
-        const pubBytes = houseSigner.publicKey;
-        const hexChars = Array.from(new Uint8Array(pubBytes)).map(b => b.toString(16).padStart(2, '0')).join('');
-        const houseAddress = Address.fromString('0x' + hexChars);
+        // Construct proper house Address: ML-DSA public key (1312 bytes) + classical public key (33 bytes)
+        const houseAddress = new Address(houseMldsaSigner.publicKey, houseSigner.publicKey);
 
         // Create contract with house as sender
         const contract = getContract<IOP20Contract>(
