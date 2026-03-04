@@ -108,7 +108,7 @@ export function useBlockchain() {
 
   /* ---- Fetch latest block height ---- */
   const fetchBlockHeight = useCallback(async () => {
-    const p = getProvider();
+    const p = (wallet.provider as JSONRpcProvider | null) ?? getProvider();
     if (!p) return;
     setLoadingBlock(true);
     try {
@@ -119,7 +119,7 @@ export function useBlockchain() {
     } finally {
       setLoadingBlock(false);
     }
-  }, [getProvider]);
+  }, [wallet.provider, getProvider]);
 
   /* Auto-fetch on mount + interval */
   useEffect(() => {
@@ -131,7 +131,8 @@ export function useBlockchain() {
   /* ---- Query OP20 token ---- */
   const queryToken = useCallback(
     async (contractAddress: string) => {
-      const p = getProvider();
+      // Prefer wallet provider when connected (already authenticated to RPC)
+      const p = (wallet.provider as JSONRpcProvider | null) ?? getProvider();
       if (!p) {
         setError('No RPC provider available');
         return;
@@ -148,27 +149,45 @@ export function useBlockchain() {
           walletAddr ?? undefined,
         );
 
-        // Parallel read
-        const [nameRes, symbolRes, decimalsRes, supplyRes] = await Promise.all([
-          contract.name().catch(() => null),
-          contract.symbol().catch(() => null),
-          contract.decimals().catch(() => null),
-          contract.totalSupply().catch(() => null),
-        ]);
+        let name = 'Unknown';
+        let symbol = '???';
+        let decimals = 8;
+        let totalSupply = 0n;
 
-        const name = nameRes?.properties?.name ?? 'Unknown';
-        const symbol = symbolRes?.properties?.symbol ?? '???';
-        const decimals = decimalsRes?.properties?.decimals ?? 8;
-        const totalSupply = supplyRes?.properties?.totalSupply ?? 0n;
+        // Try metadata() first — single call, most efficient
+        try {
+          const meta = await contract.metadata();
+          if (meta.revert) throw new Error(meta.revert);
+          name = meta.properties.name || name;
+          symbol = meta.properties.symbol || symbol;
+          decimals = meta.properties.decimals ?? decimals;
+          totalSupply = meta.properties.totalSupply ?? totalSupply;
+        } catch (metaErr) {
+          console.warn('metadata() failed, trying individual calls:', metaErr);
+          // Fall back to individual calls
+          const [nameRes, symbolRes, decimalsRes, supplyRes] = await Promise.all([
+            contract.name().catch((e: unknown) => { console.error('name():', e); return null; }),
+            contract.symbol().catch((e: unknown) => { console.error('symbol():', e); return null; }),
+            contract.decimals().catch((e: unknown) => { console.error('decimals():', e); return null; }),
+            contract.totalSupply().catch((e: unknown) => { console.error('totalSupply():', e); return null; }),
+          ]);
+
+          if (nameRes && !nameRes.revert) name = nameRes.properties.name ?? name;
+          if (symbolRes && !symbolRes.revert) symbol = symbolRes.properties.symbol ?? symbol;
+          if (decimalsRes && !decimalsRes.revert) decimals = decimalsRes.properties.decimals ?? decimals;
+          if (supplyRes && !supplyRes.revert) totalSupply = supplyRes.properties.totalSupply ?? totalSupply;
+        }
 
         // If wallet connected, fetch user balance
         let userBalance = 0n;
         if (walletAddr) {
           try {
             const balRes = await contract.balanceOf(walletAddr);
-            userBalance = balRes?.properties?.balance ?? 0n;
-          } catch {
-            // 0 balance or unsupported
+            if (balRes && !balRes.revert) {
+              userBalance = balRes.properties.balance ?? 0n;
+            }
+          } catch (e) {
+            console.warn('balanceOf() failed:', e);
           }
         }
 
@@ -190,7 +209,7 @@ export function useBlockchain() {
         setLoadingToken(false);
       }
     },
-    [getProvider, btcNetwork, walletAddr, log],
+    [wallet.provider, getProvider, btcNetwork, walletAddr, log],
   );
 
   /* ---- Transfer OP20 tokens ---- */
