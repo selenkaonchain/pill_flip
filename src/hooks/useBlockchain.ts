@@ -2,7 +2,7 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 import { JSONRpcProvider, getContract, OP_20_ABI, UTXO } from 'opnet';
 import type { IOP20Contract } from 'opnet';
 import { networks, fromBech32 } from '@btc-vision/bitcoin';
-import { Address, EcKeyPair, QuantumBIP32Factory, QuantumDerivationPath } from '@btc-vision/transaction';
+import { Address, EcKeyPair, QuantumBIP32Factory, QuantumDerivationPath, TransactionFactory } from '@btc-vision/transaction';
 import { useWalletConnect } from '@btc-vision/walletconnect';
 
 const NETWORK = networks.opnetTestnet;
@@ -469,15 +469,16 @@ export function useBlockchain() {
             throw new Error('House wallet has no UTXOs available. Please fund the house wallet.');
         }
 
-        // CRITICAL: Temporarily hide OP_WALLET extension so the SDK doesn't route
-        // signing through the browser wallet (which uses BroadcastChannel/postMessage
-        // and can't serialize UTXO objects with lazy getters).
-        // We want direct signing with our house private key, not wallet extension signing.
-        const savedOpnet = (window as any).opnet;
-        (window as any).opnet = undefined;
+        // CRITICAL: Monkey-patch TransactionFactory to bypass OP_WALLET detection.
+        // The SDK's signInteraction() calls detectInteractionOPWallet() which checks
+        // window.opnet.web3 and routes through the browser wallet extension.
+        // We can't modify window.opnet (it's read-only), so instead we override the
+        // prototype method to return null, forcing direct signing with our house key.
+        const origDetect = (TransactionFactory.prototype as any).detectInteractionOPWallet;
+        (TransactionFactory.prototype as any).detectInteractionOPWallet = async function() { return null; };
 
         try {
-            console.log('[HOUSE] Signing with house key (bypassing wallet extension)...');
+            console.log('[HOUSE] Signing with house key (OP_WALLET detection bypassed)...');
             const receipt = await simulation.sendTransaction({
                 signer: houseSigner,
                 mldsaSigner: houseMldsaSigner,
@@ -493,8 +494,8 @@ export function useBlockchain() {
                 ? JSON.stringify(receipt)
                 : String(receipt);
         } finally {
-            // Restore OP_WALLET for player transactions
-            (window as any).opnet = savedOpnet;
+            // Restore original detection for player transactions
+            (TransactionFactory.prototype as any).detectInteractionOPWallet = origDetect;
         }
     }, [wc.address, wc.walletAddress]);
 
