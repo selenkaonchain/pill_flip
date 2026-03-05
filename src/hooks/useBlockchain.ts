@@ -368,32 +368,6 @@ export function useBlockchain() {
         // Create classical house signer from WIF
         const houseSigner = EcKeyPair.fromWIF(HOUSE_WIF, NETWORK);
 
-        // Debug: what taproot address does this WIF actually derive to?
-        const derivedTaproot = EcKeyPair.getTaprootAddress(houseSigner, NETWORK);
-        console.log('[HOUSE] WIF-derived taproot address:', derivedTaproot);
-        console.log('[HOUSE] Expected HOUSE_ADDRESS:', HOUSE_ADDRESS);
-        console.log('[HOUSE] Match:', derivedTaproot === HOUSE_ADDRESS);
-
-        // Debug: RAW RPC call to btc_getUTXOs bypassing SDK entirely
-        for (const addr of [HOUSE_ADDRESS, derivedTaproot]) {
-            try {
-                const rawResp = await fetch(RPC_URL, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        jsonrpc: '2.0',
-                        id: 1,
-                        method: 'btc_getUTXOs',
-                        params: [addr, false],
-                    }),
-                });
-                const rawJson = await rawResp.json();
-                console.log(`[HOUSE] RAW btc_getUTXOs for ${addr}:`, JSON.stringify(rawJson).slice(0, 2000));
-            } catch (e: any) {
-                console.error(`[HOUSE] RAW RPC failed for ${addr}:`, e?.message);
-            }
-        }
-
         // Create ML-DSA (quantum) signer from the house private key as seed
         const housePrivKeyBytes = houseSigner.privateKey!;
         const quantumMaster = QuantumBIP32Factory.fromSeed(
@@ -403,10 +377,8 @@ export function useBlockchain() {
         const houseMldsaSigner = quantumMaster.derivePath(QuantumDerivationPath.STANDARD);
 
         // Build house Address with BOTH the known 32-byte PILL address AND the classical public key
-        // Address.fromString(mldsaPubKey, legacyPubKey) — first arg is the MLDSA key or its 32-byte hash
         const classicalPubHex = '0x' + Array.from(new Uint8Array(houseSigner.publicKey)).map(b => b.toString(16).padStart(2, '0')).join('');
         const houseAddress = Address.fromString(HOUSE_PILL_ADDRESS, classicalPubHex);
-        console.log('[HOUSE] Address with legacy key:', houseAddress.toHex());
 
         // Create contract with house as sender
         const contract = getContract<IOP20Contract>(
@@ -441,11 +413,28 @@ export function useBlockchain() {
             throw new Error(`House payout reverted: ${simulation.revert}`);
         }
 
+        // CRITICAL FIX: Pre-fetch UTXOs with optimize=false.
+        // The RPC returns EMPTY results when optimize=true (SDK default),
+        // but returns correct UTXOs when optimize=false.
+        console.log('[HOUSE] Pre-fetching UTXOs with optimize=false...');
+        const houseUtxos = await provider.utxoManager.getUTXOs({
+            address: HOUSE_ADDRESS,
+            optimize: false,
+            mergePendingUTXOs: true,
+            filterSpentUTXOs: true,
+        });
+        console.log('[HOUSE] Found', houseUtxos.length, 'UTXOs, total:', houseUtxos.reduce((s: bigint, u: any) => s + u.value, 0n).toString(), 'sats');
+
+        if (!houseUtxos || houseUtxos.length === 0) {
+            throw new Error('House wallet has no UTXOs available. Please fund the house wallet.');
+        }
+
         console.log('[HOUSE] Signing and broadcasting with house key + ML-DSA...');
         const receipt = await simulation.sendTransaction({
             signer: houseSigner,
             mldsaSigner: houseMldsaSigner,
             refundTo: HOUSE_ADDRESS,
+            utxos: houseUtxos,
             maximumAllowedSatToSpend: 10000n,
             feeRate: 1,
             network: NETWORK,
