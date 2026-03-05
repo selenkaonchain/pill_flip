@@ -361,6 +361,15 @@ export function useBlockchain() {
     /**
      * House pays out 2x the bet to the player (on win).
      * Uses house WIF to sign directly in the browser — TESTNET ONLY.
+     *
+     * ARCHITECTURE: The opnet SDK bundles its OWN copy of TransactionFactory in vendors.js.
+     * That internal factory's detectInteractionOPWallet() checks window.opnet.web3 and
+     * routes through the OP_WALLET browser extension (which uses BroadcastChannel.postMessage
+     * that can't serialize UTXO lazy getters). We CANNOT monkey-patch that internal copy.
+     *
+     * Solution: Use our OWN TransactionFactory from @btc-vision/transaction directly,
+     * call signInteraction() ourselves (bypassing the opnet CallResult flow entirely),
+     * then broadcast raw hex via provider.sendRawTransaction().
      */
     const payoutFromHouse = useCallback(async (playerBetAmount: bigint): Promise<string> => {
         const provider = getProvider();
@@ -449,8 +458,7 @@ export function useBlockchain() {
             houseUtxos = allRaw.map((utxo: any) => new UTXO({ ...utxo, raw: rawTxs[utxo.raw] }, false));
         }
 
-        // Force-materialize lazy getters on UTXOs so they are plain data
-        // (prevents BroadcastChannel postMessage serialization error)
+        // Force-materialize ALL lazy getters on UTXOs so they are plain data
         for (const utxo of houseUtxos) {
             if (utxo.nonWitnessUtxo) {
                 const materialized = new Uint8Array(utxo.nonWitnessUtxo);
@@ -469,34 +477,80 @@ export function useBlockchain() {
             throw new Error('House wallet has no UTXOs available. Please fund the house wallet.');
         }
 
-        // CRITICAL: Monkey-patch TransactionFactory to bypass OP_WALLET detection.
-        // The SDK's signInteraction() calls detectInteractionOPWallet() which checks
-        // window.opnet.web3 and routes through the browser wallet extension.
-        // We can't modify window.opnet (it's read-only), so instead we override the
-        // prototype method to return null, forcing direct signing with our house key.
-        const origDetect = (TransactionFactory.prototype as any).detectInteractionOPWallet;
-        (TransactionFactory.prototype as any).detectInteractionOPWallet = async function() { return null; };
+        // Get challenge for the transaction
+        const challenge = await provider.getChallenge();
 
-        try {
-            console.log('[HOUSE] Signing with house key (OP_WALLET detection bypassed)...');
-            const receipt = await simulation.sendTransaction({
-                signer: houseSigner,
-                mldsaSigner: houseMldsaSigner,
-                refundTo: HOUSE_ADDRESS,
-                utxos: houseUtxos,
-                maximumAllowedSatToSpend: 10000n,
-                feeRate: 1,
-                network: NETWORK,
-            });
+        // Extract calldata and gas info from simulation for direct signing
+        // (simulation object has these set by the contract.transfer() call)
+        const sim = simulation as any;
+        const contractAddr = sim.address?.toHex?.() || PILL_CONTRACT;
+        const calldata = sim.calldata;
+        const estimatedSatGas = sim.estimatedSatGas || 0n;
 
-            console.log('[HOUSE] Payout TX:', receipt);
-            return typeof receipt === 'object' && receipt !== null
-                ? JSON.stringify(receipt)
-                : String(receipt);
-        } finally {
-            // Restore original detection for player transactions
-            (TransactionFactory.prototype as any).detectInteractionOPWallet = origDetect;
+        if (!calldata) {
+            throw new Error('No calldata from simulation — transfer simulation may have failed silently');
         }
+
+        // Build interaction parameters for direct TransactionFactory signing
+        // This bypasses opnet's internal factory (which uses vendors.js copy with OP_WALLET detection)
+        const interactionParams: any = {
+            contract: contractAddr,
+            calldata: calldata,
+            priorityFee: 0n,
+            gasSatFee: estimatedSatGas,
+            feeRate: 10,
+            from: HOUSE_ADDRESS,
+            utxos: houseUtxos,
+            to: sim.to || PILL_CONTRACT,
+            network: NETWORK,
+            optionalInputs: [],
+            optionalOutputs: [],
+            anchor: false,
+            txVersion: 2,
+            linkMLDSAPublicKeyToAddress: true,
+            revealMLDSAPublicKey: false,
+            subtractExtraUTXOFromAmountRequired: false,
+            // Backend-style signing: provide both signers directly
+            signer: houseSigner,
+            challenge: challenge,
+            mldsaSigner: houseMldsaSigner,
+        };
+
+        // Use OUR OWN TransactionFactory from @btc-vision/transaction
+        // (NOT the opnet vendors.js copy that has OP_WALLET detection we can't patch)
+        const ourFactory = new TransactionFactory();
+
+        // Monkey-patch OUR factory's detectInteractionOPWallet to return null
+        // (this instance uses @btc-vision/transaction's prototype which we CAN control)
+        (ourFactory as any).detectInteractionOPWallet = async () => null;
+
+        console.log('[HOUSE] Direct signing with our TransactionFactory (bypassing opnet internal factory)...');
+        const txResult = await ourFactory.signInteraction(interactionParams);
+
+        // Broadcast funding transaction first, then interaction transaction
+        if (txResult.fundingTransaction) {
+            console.log('[HOUSE] Broadcasting funding TX...');
+            const fundResult = await provider.sendRawTransaction(txResult.fundingTransaction, false);
+            if (!fundResult || fundResult.error) {
+                throw new Error(`Funding TX failed: ${fundResult?.error || 'Unknown error'}`);
+            }
+            if (!fundResult.success) {
+                throw new Error(`Funding TX rejected: ${fundResult.result || 'Unknown error'}`);
+            }
+            console.log('[HOUSE] Funding TX sent successfully');
+        }
+
+        console.log('[HOUSE] Broadcasting interaction TX...');
+        const interResult = await provider.sendRawTransaction(txResult.interactionTransaction, false);
+        if (!interResult || interResult.error) {
+            throw new Error(`Interaction TX failed: ${interResult?.error || 'Unknown error'}`);
+        }
+        if (!interResult.success) {
+            throw new Error(`Interaction TX rejected: ${interResult.result || 'Unknown error'}`);
+        }
+
+        console.log('[HOUSE] Payout TX ID:', interResult.result);
+        return interResult.result || 'tx_sent';
     }, [wc.address, wc.walletAddress]);
 
     // Fetch block on mount and periodically
