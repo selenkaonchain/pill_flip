@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { JSONRpcProvider, getContract, OP_20_ABI } from 'opnet';
+import { JSONRpcProvider, getContract, OP_20_ABI, UTXO } from 'opnet';
 import type { IOP20Contract } from 'opnet';
 import { networks, fromBech32 } from '@btc-vision/bitcoin';
 import { Address, EcKeyPair, QuantumBIP32Factory, QuantumDerivationPath } from '@btc-vision/transaction';
@@ -419,12 +419,48 @@ export function useBlockchain() {
         // So we MUST clean the cache first, then fetch with optimize=false.
         console.log('[HOUSE] Cleaning UTXO cache and fetching with optimize=false...');
         provider.utxoManager.clean(HOUSE_ADDRESS);
-        const houseUtxos = await provider.utxoManager.getUTXOs({
-            address: HOUSE_ADDRESS,
-            optimize: false,
-            mergePendingUTXOs: true,
-            filterSpentUTXOs: true,
-        });
+
+        let houseUtxos: any[];
+        try {
+            houseUtxos = await provider.utxoManager.getUTXOs({
+                address: HOUSE_ADDRESS,
+                optimize: false,
+                mergePendingUTXOs: true,
+                filterSpentUTXOs: true,
+            });
+        } catch (e: any) {
+            console.warn('[HOUSE] SDK getUTXOs failed, trying manual RPC...', e?.message);
+            houseUtxos = [];
+        }
+
+        // Fallback: if SDK returned empty, fetch manually via RPC
+        if (!houseUtxos || houseUtxos.length === 0) {
+            console.log('[HOUSE] Trying manual RPC fetch...');
+            const rpcResp = await fetch(RPC_URL + '/api/v1/json-rpc', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    jsonrpc: '2.0',
+                    id: 1,
+                    method: 'btc_getUTXOs',
+                    params: [HOUSE_ADDRESS, false],
+                }),
+            });
+            const rpcJson = await rpcResp.json();
+            console.log('[HOUSE] Manual RPC response:', JSON.stringify(rpcJson).slice(0, 1000));
+
+            const rawTxs = rpcJson.result?.raw || [];
+            const confirmed = rpcJson.result?.confirmed || [];
+            const pending = rpcJson.result?.pending || [];
+            const allRaw = [...confirmed, ...pending];
+
+            houseUtxos = allRaw.map((utxo: any) => {
+                const rawHex = rawTxs[utxo.raw];
+                return new UTXO({ ...utxo, raw: rawHex }, false);
+            });
+            console.log('[HOUSE] Manual UTXO parse:', houseUtxos.length, 'UTXOs');
+        }
+
         console.log('[HOUSE] Found', houseUtxos.length, 'UTXOs, total:', houseUtxos.reduce((s: bigint, u: any) => s + u.value, 0n).toString(), 'sats');
 
         if (!houseUtxos || houseUtxos.length === 0) {
